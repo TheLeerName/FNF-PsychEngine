@@ -1,11 +1,18 @@
 package flixel.addons.display;
 
-import flixel.system.FlxAssets.FlxShader;
 import lime.utils.Float32Array;
+import lime.graphics.WebGLRenderContext;
+
+import openfl.utils._internal.Log;
 import openfl.display.BitmapData;
 import openfl.display.ShaderInput;
 import openfl.display.ShaderParameter;
 import openfl.display.ShaderParameterType;
+import openfl.display3D._internal.GLShader;
+
+import flixel.system.FlxAssets.FlxShader;
+
+using StringTools;
 
 /**
  * An wrapper for Flixel/OpenFL's shaders, which takes fragment and vertex source
@@ -21,7 +28,10 @@ import openfl.display.ShaderParameterType;
  * @author MasterEric
  * @see https://github.com/openfl/openfl/blob/develop/src/openfl/utils/_internal/ShaderMacro.hx
  * @see https://dixonary.co.uk/blog/shadertoy
+ * 
+ * Modified by TheLeerName to use backend.ErrorHandler class for error logging
  */
+@:access(openfl.display3D.Context3D)
 class FlxRuntimeShader extends FlxShader
 {
 	#if FLX_DRAW_QUADS
@@ -188,17 +198,31 @@ class FlxRuntimeShader extends FlxShader
 	static final PRAGMA_PRECISION:String = "#pragma precision";
 	static final PRAGMA_VERSION:String = "#pragma version";
 
-	private var _glslVersion:Int;
+	/**
+	 * GLSL version used in current shader. (100 on mobile, 120 on other platforms)
+	 */
+	public var _glslVersion:Int = #if mobile 100 #else 120 #end;
+	/**
+	 * Fragment source without `#pragma` replacements.
+	 */
+	public var fragmentSource:String;
+	/**
+	 * Vertex source without `#pragma` replacements.
+	 */
+	public var vertexSource:String;
 
 	/**
 	 * Constructs a GLSL shader.
 	 * @param fragmentSource The fragment shader source.
 	 * @param vertexSource The vertex shader source.
+	 * @param glslVersion GLSL version to use.
 	 * Note you also need to `initialize()` the shader MANUALLY! It can't be done automatically.
 	 */
-	public function new(fragmentSource:String = null, vertexSource:String = null, glslVersion:Int = 120):Void
+	public function new(?fragmentSource:String, ?vertexSource:String, ?glslVersion:Int):Void
 	{
-		_glslVersion = glslVersion;
+		if (glslVersion != null) _glslVersion = glslVersion;
+		this.fragmentSource = fragmentSource;
+		this.vertexSource = vertexSource;
 
 		if (fragmentSource == null)
 		{
@@ -231,7 +255,81 @@ class FlxRuntimeShader extends FlxShader
 
 		super();
 	}
-	
+
+	override function __createGLShader(source:String, type:Int):GLShader {
+		var gl = __context.gl;
+		var shader = compileShader(source, type);
+
+		var shaderInfoLog = gl.getShaderInfoLog(shader);
+		var hasInfoLog = shaderInfoLog != null && StringTools.trim(shaderInfoLog) != "";
+		var compileStatus = gl.getShaderParameter(shader, gl.COMPILE_STATUS);
+
+		if (compileStatus == 0) {
+			shader = doError(shader, shaderInfoLog, type);
+			//Log.error(message); die mf
+		}
+		else if (hasInfoLog) {
+			var message = (compileStatus == 0) ? "Error" : "Info";
+			message += (type == gl.VERTEX_SHADER) ? " compiling vertex shader" : " compiling fragment shader";
+			message += "\n" + shaderInfoLog;
+			message += "\n" + source;
+			Log.debug(message);
+		}
+
+		return shader;
+	}
+
+	inline function compileShader(source:String, type:Int) {
+		var gl = __context.gl;
+		var shader = gl.createShader(type);
+		gl.shaderSource(shader, source);
+		gl.compileShader(shader);
+		return shader;
+	}
+
+	inline function shaderInfoLog_subtract(type:Int):Int {
+		var gl = __context.gl;
+		var subtractThese:Int = 0;
+		var source:String = type == gl.FRAGMENT_SHADER ? fragmentSource : vertexSource;
+		if (source.contains(PRAGMA_HEADER)) {
+			subtractThese += (type == gl.FRAGMENT_SHADER ? BASE_FRAGMENT_HEADER : BASE_VERTEX_HEADER).split('\n').length - 1;
+			subtractThese += buildPrecisionHeaders().split('\n').length - 1; // #pragma precision
+			subtractThese += 1; // #pragma version
+		}
+		if (source.contains(PRAGMA_BODY))
+			subtractThese += (type == gl.FRAGMENT_SHADER ? BASE_FRAGMENT_BODY : BASE_VERTEX_BODY).split('\n').length - 1;
+		if (source.contains(PRAGMA_PRECISION))
+			subtractThese += buildPrecisionHeaders().split('\n').length - 1;
+		if (source.contains(PRAGMA_VERSION))
+			subtractThese += 1;
+
+		return subtractThese;
+	}
+
+	function doError(shader:GLShader, shaderInfoLog:String, type:Int):GLShader {
+		var gl = __context.gl;
+		gl.deleteShader(shader);
+
+		var errorLines:Array<String> = [];
+		var subtractThese:Int = shaderInfoLog_subtract(type);
+		for (line in shaderInfoLog.split('\n')) if (line.contains('(')) {
+			var index:Int = Std.parseInt(line.substring(line.indexOf('(') + 1, line.indexOf(')')));
+			index -= subtractThese;
+			errorLines.push(index + line.substring(line.indexOf(':')));
+		}
+
+		if (type == gl.FRAGMENT_SHADER) {
+			CoolUtil.doError("Error compiling fragment shader", fragmentSource != null ? fragmentSource : processFragmentSource(DEFAULT_FRAGMENT_SOURCE), errorLines);
+			fragmentSource = null;
+			shader = compileShader(processFragmentSource(DEFAULT_FRAGMENT_SOURCE), type);
+		} else {
+			CoolUtil.doError("Error compiling vertex shader", vertexSource != null ? vertexSource : processVertexSource(DEFAULT_VERTEX_SOURCE), errorLines);
+			vertexSource = null;
+			shader = compileShader(processVertexSource(DEFAULT_VERTEX_SOURCE), type);
+		}
+		return shader;
+	}
+
 	/**
 	 * Replace the `#pragma header` and `#pragma body` with the fragment shader header and body.
 	 */

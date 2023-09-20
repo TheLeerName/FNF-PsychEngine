@@ -114,6 +114,17 @@ class CoolUtil
 		#end
 	}
 
+	public static function doError(title:String, content:String, ?errorLines:Array<String>) {
+		#if windows
+		sys.thread.Thread.create(() -> {
+			ErrorHandler.setStuff(title, content, errorLines);
+			Sys.command(Sys.programPath(), ["--error-handler"]);
+		});
+		#else
+		openfl.Lib.application.window.alert(content, title);
+		#end
+	}
+
 	/** Quick Function to Fix Save Files for Flixel 5
 		if you are making a mod, you are gonna wanna change "ShadowMario" to something else
 		so Base Psych saves won't conflict with yours
